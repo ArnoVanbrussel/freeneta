@@ -64,14 +64,11 @@ class Freeneta:
         top = ttk.Frame(main)
         top.pack(fill="x", pady=(0, 10))
 
-        ttk.Label(top, text="Host IP").pack(side="left")
+        ttk.Label(top, text="Host interface").pack(side="left")
 
         self.host_ip_var = tk.StringVar()
         self.host_interface_var = tk.StringVar()
         self.host_interfaces = self.get_host_interfaces()
-
-        self.host_ip_entry = ttk.Entry(top, textvariable=self.host_ip_var, width=18)
-        self.host_ip_entry.pack(side="left", padx=(8, 6))
 
         interface_values = [f"{iface} ({ip})" for iface, ip in self.host_interfaces]
 
@@ -80,17 +77,15 @@ class Freeneta:
             textvariable=self.host_interface_var,
             values=interface_values,
             state="readonly",
-            width=30,
+            width=34,
         )
-        self.interface_combo.pack(side="left", padx=(0, 14))
+        self.interface_combo.pack(side="left", padx=(8, 6))
         self.interface_combo.bind("<<ComboboxSelected>>", self.on_interface_selected)
 
-        if self.host_interfaces:
-            first_iface, first_ip = self.host_interfaces[0]
-            self.host_interface_var.set(f"{first_iface} ({first_ip})")
-            self.host_ip_var.set(first_ip)
-        else:
-            self.host_ip_var.set("")
+        self.refresh_interfaces_btn = ttk.Button(top, text="Refresh interfaces", command=self.refresh_interfaces_only)
+        self.refresh_interfaces_btn.pack(side="left", padx=(0, 14))
+
+        self.refresh_host_interfaces(preserve_selection=False)
 
         self.scan_btn = ttk.Button(top, text="Scan", command=self.scan_devices)
         self.scan_btn.pack(side="left")
@@ -203,7 +198,7 @@ class Freeneta:
         self.notes = tk.Text(right, height=9, wrap="word", relief="solid", borderwidth=1)
         self.notes.insert(
             "1.0",
-            "Freeneta – v1.1\n\n"
+            "Freeneta – v1.2\n\n"
             "Features:\n"
             "- Discover PROFINET devices using DCP\n"
             "- Show station name, MAC, vendor, IP, subnet, and gateway\n"
@@ -346,6 +341,50 @@ class Freeneta:
                 self.host_ip_var.set(ip)
                 break
 
+    def refresh_host_interfaces(self, preserve_selection: bool = True) -> None:
+        previous_selection = self.host_interface_var.get() if preserve_selection else ""
+        previous_iface_name = previous_selection.split(" (", 1)[0] if previous_selection else ""
+        previous_ip = self.host_ip_var.get().strip()
+
+        self.host_interfaces = self.get_host_interfaces()
+        interface_values = [f"{iface} ({ip})" for iface, ip in self.host_interfaces]
+        self.interface_combo["values"] = interface_values
+
+        selected_label = ""
+        if preserve_selection and previous_selection in interface_values:
+            selected_label = previous_selection
+        elif preserve_selection and previous_iface_name:
+            for iface_name, ip in self.host_interfaces:
+                if iface_name == previous_iface_name:
+                    selected_label = f"{iface_name} ({ip})"
+                    break
+        elif preserve_selection and previous_ip:
+            for iface_name, ip in self.host_interfaces:
+                if ip == previous_ip:
+                    selected_label = f"{iface_name} ({ip})"
+                    break
+        elif interface_values:
+            selected_label = interface_values[0]
+
+        if selected_label:
+            self.host_interface_var.set(selected_label)
+            self.on_interface_selected()
+        else:
+            self.host_interface_var.set("")
+            self.host_ip_var.set("")
+
+    def refresh_interfaces_only(self) -> None:
+        previous_ip = self.host_ip_var.get().strip()
+        self.refresh_host_interfaces(preserve_selection=True)
+        current_ip = self.host_ip_var.get().strip()
+        if current_ip:
+            if current_ip != previous_ip:
+                self.status_var.set(f"Host interface refreshed. Using {current_ip}.")
+            else:
+                self.status_var.set(f"Host interface list refreshed. Still using {current_ip}.")
+        else:
+            self.status_var.set("No usable IPv4 host interface found.")
+
     def _get_dcp(self):
         if DCP is None:
             raise RuntimeError("pnio_dcp is not installed in this Python environment.")
@@ -355,6 +394,7 @@ class Freeneta:
         return DCP(host_ip)
 
     def scan_devices(self) -> None:
+        self.refresh_host_interfaces()
         self.scan_btn.configure(state="disabled")
         self.refresh_btn.configure(state="disabled")
         self.status_var.set("Scanning for PROFINET devices...")
@@ -455,15 +495,17 @@ class Freeneta:
         if not dev:
             messagebox.showinfo("No selection", "Pick a device first.")
             return
-        ip = simpledialog.askstring("Set IP", "New IP address:", initialvalue=dev.ip if dev.ip != "0.0.0.0" else "192.168.0.10")
-        if not ip:
+
+        values = self._ask_ip_config(
+            ip=dev.ip if dev.ip != "0.0.0.0" else "192.168.0.10",
+            netmask=dev.netmask if dev.netmask and dev.netmask != "0.0.0.0" else "255.255.255.0",
+            gateway=dev.gateway if dev.gateway else "0.0.0.0",
+            mac=dev.mac,
+        )
+        if not values:
             return
-        netmask = simpledialog.askstring("Set Netmask", "Netmask:", initialvalue=dev.netmask if dev.netmask and dev.netmask != "0.0.0.0" else "255.255.255.0")
-        if not netmask:
-            return
-        gateway = simpledialog.askstring("Set Gateway", "Gateway:", initialvalue=dev.gateway if dev.gateway else "0.0.0.0")
-        if gateway is None:
-            return
+
+        ip, netmask, gateway = values
         try:
             dcp = self._get_dcp()
             dcp.set_ip_address(dev.mac, [ip, netmask, gateway])
@@ -471,6 +513,73 @@ class Freeneta:
             self.scan_devices()
         except Exception as exc:
             messagebox.showerror("Set IP failed", str(exc))
+
+    def _ask_ip_config(self, ip: str, netmask: str, gateway: str, mac: str):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Set IP configuration")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.attributes("-topmost", True)
+
+        try:
+            dialog.iconbitmap(self.root.iconbitmap())
+        except Exception:
+            pass
+
+        frame = ttk.Frame(dialog, padding=14)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text=f"Assign IP settings for {mac}").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ttk.Label(frame, text="IP address").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Subnet mask").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Gateway").grid(row=3, column=0, sticky="w", pady=4)
+
+        ip_var = tk.StringVar(value=ip)
+        netmask_var = tk.StringVar(value=netmask)
+        gateway_var = tk.StringVar(value=gateway)
+
+        ip_entry = ttk.Entry(frame, textvariable=ip_var, width=22)
+        netmask_entry = ttk.Entry(frame, textvariable=netmask_var, width=22)
+        gateway_entry = ttk.Entry(frame, textvariable=gateway_var, width=22)
+        ip_entry.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=4)
+        netmask_entry.grid(row=2, column=1, sticky="ew", padx=(12, 0), pady=4)
+        gateway_entry.grid(row=3, column=1, sticky="ew", padx=(12, 0), pady=4)
+
+        result = {"value": None}
+
+        def submit(event=None):
+            result["value"] = (ip_var.get().strip(), netmask_var.get().strip(), gateway_var.get().strip())
+            dialog.destroy()
+
+        def cancel(event=None):
+            dialog.destroy()
+
+        btns = ttk.Frame(frame)
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=cancel).pack(side="right")
+        ttk.Button(btns, text="Apply", command=submit).pack(side="right", padx=(0, 8))
+
+        frame.columnconfigure(1, weight=1)
+        dialog.bind("<Return>", submit)
+        dialog.bind("<Escape>", cancel)
+        ip_entry.focus_set()
+        dialog.update_idletasks()
+
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        root_w = self.root.winfo_width()
+        root_h = self.root.winfo_height()
+        dialog_w = dialog.winfo_width()
+        dialog_h = dialog.winfo_height()
+        pos_x = root_x + max((root_w - dialog_w) // 2, 0)
+        pos_y = root_y + max((root_h - dialog_h) // 2, 0)
+        dialog.geometry(f"+{pos_x}+{pos_y}")
+        dialog.lift()
+        dialog.focus_force()
+
+        self.root.wait_window(dialog)
+        return result["value"]
 
     def set_name_for_selected(self) -> None:
         dev = self._selected_device()
