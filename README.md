@@ -7,6 +7,8 @@ FreeNeta allows you to quickly discover and configure PROFINET devices using **D
 
 The project started because downloading Siemens **PRONETA** requires creating an account and registering personal details just to access a "free" tool. FreeNeta aims to provide a **simple, lightweight, open-source alternative** for basic discovery and diagnostics.
 
+FreeNeta is meant as a lightweight quick-scan tool, not a full replacement for Proneta.
+
 ---
 
 ## Features
