@@ -403,13 +403,29 @@ class Freeneta:
 
         self._build_columns_menu()
         self._update_tree_columns()
+
+        # Force the default startup view explicitly so the app does not randomly
+        # launch with the right pane hidden like a clown show.
+        self.show_topology_var.set(True)
+        self.show_notes_var.set(True)
         self.update_view_visibility()
+
         self.root.bind("<Configure>", self._on_root_resize, add="+")
         self.body_pane.bind("<ButtonRelease-1>", lambda _e: self._save_current_sash_fraction(), add="+")
-        self.root.after_idle(self.top_scroller._update_scrollbar_visibility)
-        self.root.after_idle(self._restore_sash_fraction)
-        self.root.after_idle(self.outer._update_scrollbar_visibility)
+        self.root.after_idle(self._apply_initial_layout)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _apply_initial_layout(self) -> None:
+        # Re-assert the intended default startup layout after the first real
+        # geometry pass, because Tkinter occasionally decides otherwise.
+        self.show_topology_var.set(True)
+        self.show_notes_var.set(True)
+        self._ensure_right_panel_visible()
+        self.update_view_visibility()
+        self.top_scroller._update_scrollbar_visibility()
+        self._restore_sash_fraction()
+        self.outer._update_scrollbar_visibility()
+
 
     def _on_root_resize(self, event=None) -> None:
         if event is not None and event.widget is not self.root:
