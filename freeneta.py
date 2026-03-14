@@ -203,6 +203,8 @@ class Freeneta:
         self.quick_actions = []
         self.quick_menu_button = None
         self.quick_menu = None
+        self.user_resized_columns = set()
+        self._column_widths_before_drag = {}
         self.show_topology_var = tk.BooleanVar(value=True)
         self.show_notes_var = tk.BooleanVar(value=True)
         self.column_vars = {
@@ -371,19 +373,19 @@ class Freeneta:
         }
         self.column_labels = headings.copy()
         widths = {
-            "name": 210,
-            "mac": 150,
-            "vendor": 220,
-            "ip": 110,
-            "ping": 95,
-            "netmask": 110,
-            "gateway": 110,
-            "family": 200,
+            "name": self._scaled(210),
+            "mac": self._scaled(150),
+            "vendor": self._scaled(220),
+            "ip": self._scaled(110),
+            "ping": self._scaled(110),
+            "netmask": self._scaled(125),
+            "gateway": self._scaled(125),
+            "family": self._scaled(200),
         }
         stretchable_columns = {"name", "vendor", "family"}
         for col in columns:
             self.tree.heading(col, text=headings[col])
-            self.tree.column(col, width=widths[col], minwidth=110, anchor="w", stretch=col in stretchable_columns)
+            self.tree.column(col, width=widths[col], minwidth=self._scaled(90), anchor="w", stretch=col in stretchable_columns)
 
         self.tree_scroll_y = AutoScrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
         self.tree_scroll_x = AutoScrollbar(tree_wrap, orient="horizontal", command=self.tree.xview)
@@ -396,6 +398,9 @@ class Freeneta:
         tree_wrap.grid_columnconfigure(0, weight=1)
 
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_selection_changed)
+        self.tree.bind("<ButtonPress-1>", self._remember_column_widths_before_drag, add="+")
+        self.tree.bind("<ButtonRelease-1>", self._detect_user_column_resize, add="+")
+        self.tree.bind("<Double-1>", self._autosize_column_from_header_doubleclick, add="+")
 
         action_row = ttk.Frame(left)
         action_row.grid(row=1, column=0, sticky="ew", pady=(10, 0))
@@ -634,6 +639,8 @@ class Freeneta:
                 foreground=c["text"],
                 fieldbackground=c["panel"],
                 rowheight=self._scaled(28),
+                borderwidth=1,
+                relief="solid",
                 bordercolor=c["canvas_border"],
                 lightcolor=c["canvas_border"],
                 darkcolor=c["canvas_border"],
@@ -642,9 +649,14 @@ class Freeneta:
                 "Treeview.Heading",
                 background=c["panel"],
                 foreground=c["text"],
-                relief="flat",
-                padding=(8, 6),
+                relief="raised",
+                borderwidth=1,
+                padding=(self._scaled(10), self._scaled(8)),
                 font="TkHeadingFont",
+            )
+            style.map(
+                "Treeview.Heading",
+                relief=[("active", "raised"), ("pressed", "sunken")]
             )
             style.map(
                 "Treeview",
@@ -704,8 +716,92 @@ class Freeneta:
             display_columns = ["name"]
             self.column_vars["name"].set(True)
         self.tree.configure(displaycolumns=tuple(display_columns))
+        self.root.after_idle(self.autosize_tree_columns)
         if hasattr(self, "top_scroller"):
             self.top_scroller.after_idle(self.top_scroller._update_scrollbar_visibility)
+
+    def _tree_display_columns(self):
+        display_cols = self.tree.cget("displaycolumns")
+        if display_cols == "#all":
+            return tuple(self.tree["columns"])
+        if isinstance(display_cols, str):
+            return tuple(col for col in display_cols.split() if col)
+        return tuple(display_cols)
+
+    def _remember_column_widths_before_drag(self, _event=None) -> None:
+        self._column_widths_before_drag = {
+            col: self.tree.column(col, "width") for col in self._tree_display_columns()
+        }
+
+    def _detect_user_column_resize(self, _event=None) -> None:
+        if not self._column_widths_before_drag:
+            return
+        for col in self._tree_display_columns():
+            before = self._column_widths_before_drag.get(col)
+            after = self.tree.column(col, "width")
+            if before is not None and after != before:
+                self.user_resized_columns.add(col)
+        self._column_widths_before_drag = {}
+
+    def _column_key_from_event(self, event) -> Optional[str]:
+        region = self.tree.identify_region(event.x, event.y)
+        if region != "separator" and region != "heading":
+            return None
+        col_id = self.tree.identify_column(event.x)
+        if not col_id or col_id == "#0":
+            return None
+        try:
+            idx = int(col_id[1:]) - 1
+        except Exception:
+            return None
+        display_cols = self._tree_display_columns()
+        if 0 <= idx < len(display_cols):
+            return display_cols[idx]
+        return None
+
+    def _autosize_column_from_header_doubleclick(self, event) -> None:
+        col = self._column_key_from_event(event)
+        if not col:
+            return
+        self.user_resized_columns.discard(col)
+        self.autosize_tree_columns(columns=[col])
+
+    def autosize_tree_columns(self, only_visible: bool = True, columns=None) -> None:
+        if columns is None:
+            display_cols = self._tree_display_columns() if only_visible else tuple(self.tree["columns"])
+        else:
+            display_cols = tuple(columns)
+
+        if not display_cols:
+            return
+
+        heading_font = tkfont.nametofont("TkHeadingFont")
+        body_font = tkfont.nametofont("TkDefaultFont")
+        padding = self._scaled(24)
+        min_col_width = self._scaled(90)
+        max_col_width = self._scaled(480)
+        tree_columns = tuple(self.tree["columns"])
+
+        for col in display_cols:
+            if col in self.user_resized_columns:
+                continue
+
+            header_text = self.column_labels.get(col, col)
+            best_width = heading_font.measure(header_text) + padding
+
+            try:
+                value_idx = tree_columns.index(col)
+            except ValueError:
+                continue
+
+            for item in self.tree.get_children():
+                values = self.tree.item(item, "values")
+                cell_text = str(values[value_idx]) if value_idx < len(values) else ""
+                best_width = max(best_width, body_font.measure(cell_text) + padding)
+
+            best_width = max(min_col_width, min(best_width, max_col_width))
+            stretch = bool(self.tree.column(col, "stretch"))
+            self.tree.column(col, width=best_width, minwidth=min_col_width, stretch=stretch)
 
     def get_host_interfaces(self):
         interfaces = []
@@ -842,6 +938,7 @@ class Freeneta:
         self.refresh_btn.configure(state="normal")
         self.status_var.set(f"Found {len(rows)} device(s).")
         self._update_tree_columns()
+        self.autosize_tree_columns()
         if self.show_topology_var.get():
             self.draw_topology()
         self._start_vendor_lookup_for_unknowns()
@@ -1176,6 +1273,7 @@ class Freeneta:
         self.devices[idx].vendor = vendor
         if self.tree.exists(str(idx)):
             self.tree.item(str(idx), values=self._device_values(self.devices[idx]))
+        self.autosize_tree_columns(columns=["vendor"])
 
     def lookup_mac_vendor(self, mac: str) -> str:
         prefix = self._mac_prefix(mac)
@@ -1247,6 +1345,8 @@ class Freeneta:
         self.devices[idx].ping_ms = ping_ms
         if self.tree.exists(str(idx)):
             self.tree.item(str(idx), values=self._device_values(self.devices[idx]))
+        if self.ping_monitor_var.get():
+            self.autosize_tree_columns(columns=["ping"])
         if self.show_topology_var.get():
             self.draw_topology()
 
