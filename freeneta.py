@@ -433,7 +433,7 @@ class Freeneta:
         self.notes = tk.Text(right, height=8, wrap="word", relief="solid", borderwidth=1, font="TkTextFont", padx=self._scaled(8), pady=self._scaled(8), spacing1=self._scaled(2), spacing3=self._scaled(2))
         self.notes.insert(
             "1.0",
-            "Freeneta – v1.2 (Linux UI branch)\n\n"
+            "Freeneta – v1.4\n\n"
             "Features:\n"
             "- Discover PROFINET devices using DCP\n"
             "- Show station name, MAC, vendor, IP, subnet, and gateway\n"
