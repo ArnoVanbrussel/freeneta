@@ -17,9 +17,26 @@ import tkinter.font as tkfont
 from typing import Dict, List, Optional
 
 try:
+    from scapy.all import load_contrib, sniff, conf, Ether
+    load_contrib("pnio")
+    load_contrib("pnio_dcp")
+    from scapy.contrib.pnio import ProfinetIO
+    from scapy.contrib.pnio_dcp import ProfinetDCP, DCPIPBlock, DCPNameOfStationBlock, DCPDeviceOptionsBlock
+    SCAPY_DCP_AVAILABLE = True
+except Exception:
+    sniff = conf = Ether = ProfinetIO = ProfinetDCP = DCPIPBlock = DCPNameOfStationBlock = DCPDeviceOptionsBlock = None
+    SCAPY_DCP_AVAILABLE = False
+
+try:
     from pnio_dcp import DCP
 except Exception:
     DCP = None
+
+DCP_IDENTIFY_RESPONSE_FRAME_ID = 0xFEFF
+DCP_SERVICE_ID_IDENTIFY = 0x05
+DCP_RESPONSE = 0x01
+PROFINET_ETHERTYPE = 0x8892
+SNIFF_EXTRA_SECONDS = 2
 
 
 class AutoScrollbar(ttk.Scrollbar):
@@ -173,6 +190,7 @@ class DeviceRow:
     netmask: str
     gateway: str
     family: str
+    dcp_access: str = "unknown"
     vendor: str = "Looking up..."
     ping_status: str = "Unknown"
     ping_ms: str = ""
@@ -350,7 +368,7 @@ class Freeneta:
         right = ttk.Frame(body)
         left.grid_rowconfigure(0, weight=1)
         left.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(2, weight=3)
+        right.grid_rowconfigure(1, weight=3)
         right.grid_rowconfigure(4, weight=1)
         right.grid_columnconfigure(0, weight=1)
         body.add(left, weight=4)
@@ -419,11 +437,10 @@ class Freeneta:
         self.topology_title.grid(row=0, column=0, sticky="w")
         self.topology_desc = ttk.Label(
             right,
-            text="This is a visual summary, not real cable topology. DCP does discovery and commissioning; it does not know physical links.",
+            text="",
             wraplength=self._scaled(460),
             justify="left",
         )
-        self.topology_desc.grid(row=1, column=0, sticky="ew", pady=(6, 10))
 
         self.canvas = tk.Canvas(right, highlightthickness=1, cursor="hand2", height=self._scaled(380))
         self.canvas.grid(row=2, column=0, sticky="nsew")
@@ -433,11 +450,12 @@ class Freeneta:
         self.notes = tk.Text(right, height=8, wrap="word", relief="solid", borderwidth=1, font="TkTextFont", padx=self._scaled(8), pady=self._scaled(8), spacing1=self._scaled(2), spacing3=self._scaled(2))
         self.notes.insert(
             "1.0",
-            "Freeneta – v1.4\n\n"
+            "Freeneta – v1.5\n\n"
             "Features:\n"
             "- Discover PROFINET devices using DCP\n"
             "- Show station name, MAC, vendor, IP, subnet, and gateway\n"
             "- Identify device vendor via MAC OUI lookup\n"
+            "- Detect DCP access level (read-only vs read-write) via raw DCP analysis\n"
             "- Optional ping monitor to check device reachability\n"
             "- Visual topology summary of discovered devices\n"
             "- Set device IP address\n"
@@ -497,16 +515,13 @@ class Freeneta:
 
         if topology_visible:
             self.topology_title.grid()
-            self.topology_desc.grid()
-            self.canvas.grid()
-            self.topology_desc.configure(wraplength=max(self.right_panel.winfo_width() - self._scaled(30), self._scaled(420)))
-            self.right_panel.grid_rowconfigure(2, weight=3)
+            self.canvas.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+            self.right_panel.grid_rowconfigure(1, weight=3)
             self.root.after_idle(self.draw_topology)
         else:
             self.topology_title.grid_remove()
-            self.topology_desc.grid_remove()
             self.canvas.grid_remove()
-            self.right_panel.grid_rowconfigure(2, weight=0)
+            self.right_panel.grid_rowconfigure(1, weight=0)
 
         if notes_visible:
             self.notes_title.grid()
@@ -662,6 +677,21 @@ class Freeneta:
                 "Treeview",
                 background=[("selected", "#2563eb" if self.dark_mode_var.get() else "#bfdbfe")],
                 foreground=[("selected", "#ffffff" if self.dark_mode_var.get() else "#111827")],
+            )
+            self.tree.tag_configure(
+                "dcp_readonly",
+                background="#f8d7da" if not self.dark_mode_var.get() else "#5b1f24",
+                foreground="#111827" if not self.dark_mode_var.get() else "#f9fafb",
+            )
+            self.tree.tag_configure(
+                "dcp_readwrite",
+                background="#d4edda" if not self.dark_mode_var.get() else "#1c4532",
+                foreground="#111827" if not self.dark_mode_var.get() else "#f9fafb",
+            )
+            self.tree.tag_configure(
+                "dcp_unknown",
+                background=c["panel"],
+                foreground=c["text"],
             )
             style.configure("Vertical.TScrollbar", arrowsize=14)
             style.configure("Horizontal.TScrollbar", arrowsize=14)
@@ -895,6 +925,119 @@ class Freeneta:
             raise RuntimeError("Host IP is empty.")
         return DCP(host_ip)
 
+    def _normalize_dcp_access(self, access_value) -> str:
+        if access_value is None:
+            return "unknown"
+        access = str(access_value).strip().lower().replace("-", "_").replace(" ", "_")
+        if access in {"read_only", "readonly", "ro"}:
+            return "read_only"
+        if access in {"read_write", "readwrite", "rw"}:
+            return "read_write"
+        return "unknown"
+
+    def _find_scapy_iface_by_ip(self, target_ip: str) -> Optional[str]:
+        if not SCAPY_DCP_AVAILABLE or conf is None:
+            return None
+        try:
+            for name, iface in conf.ifaces.items():
+                iface_ip = getattr(iface, "ip", None)
+                if iface_ip == target_ip:
+                    return name
+        except Exception:
+            return None
+        return None
+
+    def _parse_raw_dcp_response(self, pkt):
+        if not SCAPY_DCP_AVAILABLE:
+            return None
+        try:
+            if Ether not in pkt or pkt[Ether].type != PROFINET_ETHERTYPE:
+                return None
+            if ProfinetIO not in pkt or pkt[ProfinetIO].frameID != DCP_IDENTIFY_RESPONSE_FRAME_ID:
+                return None
+            if ProfinetDCP not in pkt:
+                return None
+
+            dcp = pkt[ProfinetDCP]
+            if dcp.service_id != DCP_SERVICE_ID_IDENTIFY or dcp.service_type != DCP_RESPONSE:
+                return None
+
+            result = {
+                "mac": pkt[Ether].src.lower(),
+                "name_writable": None,
+                "ip_writable": None,
+                "options_writable": None,
+            }
+
+            for block in getattr(dcp, "dcp_blocks", []):
+                if isinstance(block, DCPNameOfStationBlock):
+                    result["name_writable"] = bool(block.block_info & 0x0001)
+                elif isinstance(block, DCPIPBlock):
+                    result["ip_writable"] = bool(block.block_info & 0x0001)
+                elif isinstance(block, DCPDeviceOptionsBlock):
+                    opts = [(o.option, o.sub_option) for o in block.device_options]
+                    result["options_writable"] = any(o in {(2, 2), (1, 2)} for o in opts)
+            return result
+        except Exception:
+            return None
+
+    def _determine_dcp_access_from_raw(self, raw: Optional[dict]) -> str:
+        if raw is None:
+            return "unknown"
+
+        name_rw = raw.get("name_writable")
+        ip_rw = raw.get("ip_writable")
+        opts_rw = raw.get("options_writable")
+
+        if name_rw is True or ip_rw is True:
+            return "read_write"
+        if name_rw is False and ip_rw is False:
+            return "read_only"
+        if name_rw is False or ip_rw is False:
+            return "read_only"
+        if opts_rw is True:
+            return "read_write"
+        if opts_rw is False:
+            return "read_only"
+        return "unknown"
+
+    def _discover_devices_with_access(self):
+        dcp = self._get_dcp()
+        if not SCAPY_DCP_AVAILABLE:
+            found = dcp.identify_all()
+            return found, {}
+
+        local_ip = self.host_ip_var.get().strip()
+        iface = self._find_scapy_iface_by_ip(local_ip)
+        raw_by_mac: Dict[str, dict] = {}
+        sniffer_done = threading.Event()
+
+        def handle(pkt):
+            parsed = self._parse_raw_dcp_response(pkt)
+            if parsed:
+                raw_by_mac.setdefault(parsed["mac"], parsed)
+
+        def do_sniff():
+            timeout = 3 + SNIFF_EXTRA_SECONDS
+            try:
+                if iface:
+                    sniff(iface=iface, prn=handle, timeout=timeout, store=False)
+                else:
+                    sniff(prn=handle, timeout=timeout, store=False)
+            finally:
+                sniffer_done.set()
+
+        sniffer_thread = threading.Thread(target=do_sniff, daemon=True)
+        sniffer_thread.start()
+        time.sleep(0.3)
+        found = dcp.identify_all()
+        sniffer_done.wait(timeout=3 + SNIFF_EXTRA_SECONDS + 1)
+        access_by_mac = {}
+        for dev in found:
+            mac = str(getattr(dev, "MAC", "")).lower()
+            access_by_mac[mac] = self._determine_dcp_access_from_raw(raw_by_mac.get(mac))
+        return found, access_by_mac
+
     def scan_devices(self) -> None:
         self.refresh_host_interfaces()
         self.scan_btn.configure(state="disabled")
@@ -904,8 +1047,7 @@ class Freeneta:
 
     def _scan_worker(self) -> None:
         try:
-            dcp = self._get_dcp()
-            found = dcp.identify_all()
+            found, access_by_mac = self._discover_devices_with_access()
             rows = []
             existing_by_mac = {dev.mac.upper(): dev for dev in self.devices if dev.mac}
             for dev in found:
@@ -919,6 +1061,7 @@ class Freeneta:
                         netmask=str(getattr(dev, "netmask", "")),
                         gateway=str(getattr(dev, "gateway", "")),
                         family=str(getattr(dev, "family", "")),
+                        dcp_access=access_by_mac.get(mac.lower(), "unknown"),
                         vendor=(existing.vendor if existing else self.vendor_cache.get(self._mac_prefix(mac), "Looking up...")),
                         ping_status=existing.ping_status if existing else "Unknown",
                         ping_ms=existing.ping_ms if existing else "",
@@ -933,10 +1076,12 @@ class Freeneta:
         for item in self.tree.get_children():
             self.tree.delete(item)
         for idx, dev in enumerate(rows):
-            self.tree.insert("", "end", iid=str(idx), values=self._device_values(dev))
+            self.tree.insert("", "end", iid=str(idx), values=self._device_values(dev), tags=(self._device_row_tag(dev),))
         self.scan_btn.configure(state="normal")
         self.refresh_btn.configure(state="normal")
-        self.status_var.set(f"Found {len(rows)} device(s).")
+        read_only_count = sum(1 for dev in rows if self._device_row_tag(dev) == "dcp_readonly")
+        read_write_count = sum(1 for dev in rows if self._device_row_tag(dev) == "dcp_readwrite")
+        self.status_var.set(f"Found {len(rows)} device(s). RW: {read_write_count}  RO: {read_only_count}")
         self._update_tree_columns()
         self.autosize_tree_columns()
         if self.show_topology_var.get():
@@ -1228,14 +1373,6 @@ class Freeneta:
             self.canvas.tag_bind(text_id, "<Button-1>", self.on_canvas_click)
             self.canvas.tag_bind(line_id, "<Button-1>", self.on_canvas_click)
 
-        self.canvas.create_text(
-            w / 2,
-            h - self._scaled(24),
-            text="Visualized as host-to-device discovery. Physical switch ports and link paths require LLDP/SNMP/MAC-table data.",
-            font="TkDefaultFont",
-            fill=c["muted"],
-        )
-
     def _mac_prefix(self, mac: str) -> str:
         cleaned = "".join(ch for ch in mac.upper() if ch.isalnum())
         return cleaned[:6]
@@ -1271,8 +1408,7 @@ class Freeneta:
         if idx < 0 or idx >= len(self.devices):
             return
         self.devices[idx].vendor = vendor
-        if self.tree.exists(str(idx)):
-            self.tree.item(str(idx), values=self._device_values(self.devices[idx]))
+        self._refresh_tree_row(idx)
         self.autosize_tree_columns(columns=["vendor"])
 
     def lookup_mac_vendor(self, mac: str) -> str:
@@ -1343,8 +1479,7 @@ class Freeneta:
             return
         self.devices[idx].ping_status = status
         self.devices[idx].ping_ms = ping_ms
-        if self.tree.exists(str(idx)):
-            self.tree.item(str(idx), values=self._device_values(self.devices[idx]))
+        self._refresh_tree_row(idx)
         if self.ping_monitor_var.get():
             self.autosize_tree_columns(columns=["ping"])
         if self.show_topology_var.get():
@@ -1499,6 +1634,25 @@ Leave blank to open a plain ssh prompt.""",
             self.status_var.set(f"Launching SSH to {target}")
         except Exception as exc:
             messagebox.showerror("SSH launch failed", str(exc))
+
+    def _device_row_tag(self, dev: DeviceRow) -> str:
+        access = self._normalize_dcp_access(dev.dcp_access)
+        if access == "read_only":
+            return "dcp_readonly"
+        if access == "read_write":
+            return "dcp_readwrite"
+        return "dcp_unknown"
+
+    def _refresh_tree_row(self, idx: int) -> None:
+        if idx < 0 or idx >= len(self.devices):
+            return
+        if self.tree.exists(str(idx)):
+            dev = self.devices[idx]
+            self.tree.item(
+                str(idx),
+                values=self._device_values(dev),
+                tags=(self._device_row_tag(dev),),
+            )
 
 
     def on_close(self) -> None:

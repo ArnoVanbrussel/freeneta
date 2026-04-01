@@ -10,3 +10,4 @@ pywin32-ctypes==0.2.3
 setuptools==82.0.1
 setuptools-scm==9.2.2
 zipp==3.23.0
+scapy==2.5.0
