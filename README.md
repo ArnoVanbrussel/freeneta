@@ -46,6 +46,7 @@ Recommended install options:
 
 - Running FreeNeta as **Administrator** may be required for packet capture
 - If devices show no access status, check that Npcap is installed correctly
+- Linux support is in progress – the application may work, but DCP access detection may be unreliable due to platform differences in packet capture (Npcap is Windows-only)
 
 ---
 
