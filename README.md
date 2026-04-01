@@ -1,4 +1,3 @@
-
 # FreeNeta
 
 Lightweight **PROFINET discovery and commissioning tool** written in Python.
@@ -16,6 +15,7 @@ FreeNeta is meant as a lightweight quick-scan tool, not a full replacement for P
 - Discover PROFINET devices via **DCP**
 - View **station name, MAC, vendor, IP, subnet, gateway**
 - **Vendor lookup** via MAC OUI
+- **DCP access detection (read-only vs read-write)** using raw DCP response analysis
 - **Ping monitoring** for device reachability
 - Set **device IP address**
 - Set **station name**
@@ -25,6 +25,30 @@ FreeNeta is meant as a lightweight quick-scan tool, not a full replacement for P
 
 ---
 
+## Requirements (Windows)
+
+FreeNeta v1.5 uses packet capture to determine DCP access levels.
+
+👉 This requires **Npcap** to be installed:
+
+https://nmap.org/npcap/
+
+Recommended install options:
+- Install Npcap in **WinPcap API-compatible Mode**
+
+⚠️ Without Npcap:
+- Device discovery still works
+- **Read-only / read-write detection will NOT work**
+
+---
+
+## Notes
+
+- Running FreeNeta as **Administrator** may be required for packet capture
+- If devices show no access status, check that Npcap is installed correctly
+
+---
+
 ## Screenshot
 
-![FreeNeta UI](screenshot.png)
+![FreeNeta UI](/images/FreeNeta-v1.5-screenshot.png)
